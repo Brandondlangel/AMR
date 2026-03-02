@@ -219,7 +219,7 @@ elif st.session_state.stage == "ASK_CODE":
             assistant("That doesn’t look like a numeric code. Please enter numbers only (example: `112`).")
         else:
             rec = kb_by_code.get(code)
-            if not rec:
+            if rec is None:
                 assistant("I couldn’t find an exact match for that code in the demo KB. Try another example like `37`, `112`, `207`, `401`, or `812`.")
             else:
                 st.session_state.current_code = code
@@ -311,7 +311,7 @@ elif st.session_state.stage == "SHOW_MATCH":
         )
 
         rec = kb_by_code.get(best_code)
-        if not rec:
+        if rec is None:
             assistant("Internal demo KB error: matched code not found. Please try again.")
             st.session_state.stage = "ASK_SYMPTOMS"
         else:
