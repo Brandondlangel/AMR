@@ -2,6 +2,7 @@ import os, re, json, datetime
 import pandas as pd
 import streamlit as st
 
+# Optional: OpenAI for Route C smart matching
 OPENAI_AVAILABLE = True
 try:
     from openai import OpenAI
@@ -152,9 +153,17 @@ def init_state():
     st.session_state.current_record = None
     st.session_state.symptoms = ""
     st.session_state.events = []
+    st.session_state.messages = []  # persistent chat transcript
 
 if "stage" not in st.session_state:
     init_state()
+
+def push(role: str, content: str):
+    st.session_state.messages.append({"role": role, "content": content})
+
+def render_chat():
+    for m in st.session_state.messages:
+        st.chat_message(m["role"]).markdown(m["content"])
 
 def log_event(status: str, notes: str = ""):
     rec = st.session_state.current_record
@@ -190,86 +199,89 @@ with st.sidebar:
     st.markdown(f"- Model: `{DEFAULT_MODEL}`")
     st.markdown(f"- Smart Match: `{smart}`")
 
-def assistant(msg: str):
-    st.chat_message("assistant").markdown(msg)
+# Always render transcript first so it never "disappears" on reruns
+render_chat()
 
-def user(msg: str):
-    st.chat_message("user").markdown(msg)
-
+# Stage-driven UI
 if st.session_state.stage == "START":
-    assistant("Do you have the AMR **numeric** error code displayed on the console/HMI?")
+    if not st.session_state.messages:
+        push("assistant", "Do you have the AMR **numeric** error code displayed on the console/HMI?")
+        st.rerun()
+
     c1, c2 = st.columns(2)
     if c1.button("Yes, I have the code"):
         st.session_state.route = "A"
         st.session_state.stage = "ASK_CODE"
+        push("assistant", "Enter the **numeric** error code (examples: `37`, `112`, `401`).")
         st.rerun()
     if c2.button("No, I don't have it"):
         st.session_state.route = "B"
         st.session_state.stage = "GUIDE_GET_CODE"
+        push("assistant",
+             "**Let’s locate the numeric error code on the console/HMI.**\n\n"
+             "1) Open **Alarms / Faults** (or **Active Alarms**)\n"
+             "2) Filter to **Active / Current**\n"
+             "3) Open the most recent alarm entry\n"
+             "4) Locate the **numeric Error Code** (example: `112`) and copy it\n"
+             "5) Return here and paste the code\n\n"
+             "If you still can’t find it, we can triage by symptoms.")
         st.rerun()
 
 elif st.session_state.stage == "ASK_CODE":
-    assistant("Enter the **numeric** error code (examples: `37`, `112`, `401`).")
     code_in = st.chat_input("Enter numeric error code")
     if code_in:
-        user(code_in)
+        push("user", code_in)
         code = normalize_code(code_in)
 
         if not code.isdigit():
-            assistant("That doesn’t look like a numeric code. Please enter numbers only (example: `112`).")
-        else:
-            rec = kb_by_code.get(code)
-            if rec is None:
-                assistant("I couldn’t find an exact match for that code in the demo KB. Try another example like `37`, `112`, `207`, `401`, or `812`.")
-            else:
-                st.session_state.current_code = code
-                st.session_state.current_record = rec
-                assistant(record_to_markdown(rec))
-                assistant("Did this resolve the issue after completing the recovery checklist?")
-                st.session_state.stage = "CONFIRM1"
-                st.rerun()
+            push("assistant", "That doesn’t look like a numeric code. Please enter numbers only (example: `112`).")
+            st.rerun()
+
+        rec = kb_by_code.get(code)
+        if rec is None:
+            push("assistant", "I couldn’t find an exact match for that code in the demo KB. Try `37`, `112`, `207`, `401`, or `812`.")
+            st.rerun()
+
+        st.session_state.current_code = code
+        st.session_state.current_record = rec
+        push("assistant", record_to_markdown(rec))
+        push("assistant", "Did this resolve the issue after completing the recovery checklist?")
+        st.session_state.stage = "CONFIRM1"
+        st.rerun()
 
     c1, c2 = st.columns(2)
     if c1.button("Back"):
         st.session_state.stage = "START"
+        push("assistant", "Do you have the AMR **numeric** error code displayed on the console/HMI?")
         st.rerun()
     if c2.button("Start Over"):
         start_over()
 
 elif st.session_state.stage == "GUIDE_GET_CODE":
-    assistant(
-        "**Let’s locate the numeric error code on the console/HMI.**\n\n"
-        "1) Open **Alarms / Faults** (or **Active Alarms**)\n"
-        "2) Filter to **Active / Current**\n"
-        "3) Open the most recent alarm entry\n"
-        "4) Locate the **numeric Error Code** (example: `112`) and copy it\n"
-        "5) Return here and paste the code\n\n"
-        "If you still can’t find it, click **Still can’t get the code** and we’ll triage by symptoms."
-    )
     c1, c2, c3 = st.columns(3)
     if c1.button("I found the code"):
         st.session_state.route = "B→A"
         st.session_state.stage = "ASK_CODE"
+        push("assistant", "Great — enter the numeric code now (example: `112`).")
         st.rerun()
     if c2.button("Still can’t get the code"):
         st.session_state.route = "C"
         st.session_state.stage = "ASK_SYMPTOMS"
+        push("assistant",
+             "No problem — we can diagnose by symptoms.\n\n"
+             "Please answer in one message (bullet points are fine):\n"
+             "- What was the AMR trying to do? (navigate / charge / pick / lift / docking / etc.)\n"
+             "- What do you see? (exact message text, LEDs, alarms, behavior)\n"
+             "- Which subsystem seems affected? (Drive / Navigation / Battery / Lift / Safety / Comms / Not sure)\n"
+             "- Anything else that might help (location, recent changes, environment)")
         st.rerun()
     if c3.button("Start Over"):
         start_over()
 
 elif st.session_state.stage == "ASK_SYMPTOMS":
-    assistant(
-        "No problem — we can diagnose by symptoms.\n\n"
-        "Please answer in one message (bullet points are fine):\n"
-        "- What was the AMR trying to do? (navigate / charge / pick / lift / docking / etc.)\n"
-        "- What do you see? (exact message text, LEDs, alarms, behavior)\n"
-        "- Which subsystem seems affected? (Drive / Navigation / Battery / Lift / Safety / Comms / Not sure)\n"
-        "- Anything else that might help (location, recent changes, environment)"
-    )
     msg = st.chat_input("Describe what is happening")
     if msg:
-        user(msg)
+        push("user", msg)
         st.session_state.symptoms = msg
         subsystem_hint = ""
         m = re.search(r"(Drive|Navigation|Battery|Lift|Safety|Comms|Not sure)", msg, re.IGNORECASE)
@@ -287,57 +299,59 @@ elif st.session_state.stage == "ASK_SYMPTOMS":
     c1, c2 = st.columns(2)
     if c1.button("Back"):
         st.session_state.stage = "START"
+        push("assistant", "Do you have the AMR **numeric** error code displayed on the console/HMI?")
         st.rerun()
     if c2.button("Start Over"):
         start_over()
 
 elif st.session_state.stage == "SHOW_MATCH":
-    match = st.session_state.get("match", {"best_code":"NOT_FOUND"})
+    match = st.session_state.get("match", {"best_code": "NOT_FOUND"})
     best_code = normalize_code(match.get("best_code", "NOT_FOUND"))
     conf = float(match.get("confidence", 0.0) or 0.0)
 
     if best_code == "NOT_FOUND":
-        assistant("I couldn't confidently match your symptoms to a single numeric code in the demo KB.")
+        push("assistant", "I couldn't confidently match your symptoms to a single numeric code in the demo KB.")
         qs = match.get("next_questions", []) or []
         if qs:
-            assistant("To narrow it down, please answer:\n" + "\n".join([f"- {q}" for q in qs]))
+            push("assistant", "To narrow it down, please answer:\n" + "\n".join([f"- {q}" for q in qs]))
         st.session_state.stage = "ASK_SYMPTOMS"
-    else:
-        top3 = match.get("top_3", []) or []
-        assistant(
-            f"**Best match:** `{best_code}` (confidence: `{conf:.2f}`)\n\n"
-            + ("**Top candidates:**\n" + "\n".join([f"- `{t['code']}` (confidence `{float(t.get('confidence',0)):.2f}`)" for t in top3]) if top3 else "")
-            + ("\n\n**Reason:** " + (match.get("reason","") or "").strip())
-        )
+        st.rerun()
 
-        rec = kb_by_code.get(best_code)
-        if rec is None:
-            assistant("Internal demo KB error: matched code not found. Please try again.")
-            st.session_state.stage = "ASK_SYMPTOMS"
-        else:
-            st.session_state.current_code = best_code
-            st.session_state.current_record = rec
-            assistant("If this looks correct, follow the recovery checklist below:")
-            assistant(record_to_markdown(rec))
-            assistant("Did this resolve the issue after completing the recovery checklist?")
-            st.session_state.stage = "CONFIRM1"
+    top3 = match.get("top_3", []) or []
+    push("assistant",
+         f"**Best match:** `{best_code}` (confidence: `{conf:.2f}`)\n\n"
+         + ("**Top candidates:**\n" + "\n".join([f"- `{t['code']}` (confidence `{float(t.get('confidence',0)):.2f}`)" for t in top3]) if top3 else "")
+         + ("\n\n**Reason:** " + (match.get("reason", "") or "").strip())
+    )
+
+    rec = kb_by_code.get(best_code)
+    if rec is None:
+        push("assistant", "Internal demo KB error: matched code not found. Please try again.")
+        st.session_state.stage = "ASK_SYMPTOMS"
+        st.rerun()
+
+    st.session_state.current_code = best_code
+    st.session_state.current_record = rec
+    push("assistant", record_to_markdown(rec))
+    push("assistant", "Did this resolve the issue after completing the recovery checklist?")
+    st.session_state.stage = "CONFIRM1"
+    st.rerun()
 
 elif st.session_state.stage == "CONFIRM1":
     c1, c2, c3 = st.columns(3)
     if c1.button("Yes — Resolved"):
         log_event("RESOLVED")
-        assistant("✅ Recorded as **RESOLVED**.")
+        push("assistant", "✅ Recorded as **RESOLVED**.")
         st.session_state.stage = "POST"
         st.rerun()
     if c2.button("No — Not resolved"):
         st.session_state.attempts = 1
-        assistant(
-            "**Understood. Let’s try one alternative recovery action before escalation:**\n\n"
-            "- Re-seat any related connectors (power/comm/sensor) if accessible\n"
-            "- Perform a full power cycle (OFF 60 seconds, then ON)\n"
-            "- Retry the action at reduced speed / in a clear area\n\n"
-            "After that, did it resolve the issue?"
-        )
+        push("assistant",
+             "**Understood. Let’s try one alternative recovery action before escalation:**\n\n"
+             "- Re-seat any related connectors (power/comm/sensor) if accessible\n"
+             "- Perform a full power cycle (OFF 60 seconds, then ON)\n"
+             "- Retry the action at reduced speed / in a clear area\n\n"
+             "After that, did it resolve the issue?")
         st.session_state.stage = "CONFIRM2"
         st.rerun()
     if c3.button("Start Over"):
@@ -347,25 +361,24 @@ elif st.session_state.stage == "CONFIRM2":
     c1, c2, c3 = st.columns(3)
     if c1.button("Yes — Resolved after alternative"):
         log_event("RESOLVED_AFTER_ALT")
-        assistant("✅ Recorded as **RESOLVED after alternative recovery**.")
+        push("assistant", "✅ Recorded as **RESOLVED after alternative recovery**.")
         st.session_state.stage = "POST"
         st.rerun()
     if c2.button("No — Still not resolved"):
         st.session_state.attempts = 2
         rec = st.session_state.current_record
         code = str(rec["code"]) if rec is not None else st.session_state.current_code
-        assistant(
-            "⚠️ **Recommendation: Escalate to RCOE.**\n\n"
-            "Below is a ready-to-send escalation summary (copy/paste):\n\n"
-            f"**Escalation Summary**\n"
-            f"- Timestamp: {now()}\n"
-            f"- Code (candidate): {code}\n"
-            f"- Subsystem: {rec['subsystem'] if rec is not None else ''}\n"
-            f"- Title: {rec['title'] if rec is not None else ''}\n"
-            f"- What user reported: {st.session_state.symptoms or '(code-based)'}\n"
-            f"- Actions attempted: Primary checklist + alternative power-cycle/re-seat\n"
-            f"- Current status: Not resolved\n"
-        )
+        push("assistant",
+             "⚠️ **Recommendation: Escalate to RCOE.**\n\n"
+             "Below is a ready-to-send escalation summary (copy/paste):\n\n"
+             f"**Escalation Summary**\n"
+             f"- Timestamp: {now()}\n"
+             f"- Code (candidate): {code}\n"
+             f"- Subsystem: {rec['subsystem'] if rec is not None else ''}\n"
+             f"- Title: {rec['title'] if rec is not None else ''}\n"
+             f"- What user reported: {st.session_state.symptoms or '(code-based)'}\n"
+             f"- Actions attempted: Primary checklist + alternative power-cycle/re-seat\n"
+             f"- Current status: Not resolved\n")
         st.session_state.stage = "ESCALATE"
         st.rerun()
     if c3.button("Start Over"):
@@ -376,7 +389,7 @@ elif st.session_state.stage == "ESCALATE":
     c1, c2, c3 = st.columns(3)
     if c1.button("Mark Escalated"):
         log_event("ESCALATED_TO_RCOE", notes=notes)
-        assistant("✅ Recorded as **ESCALATED to RCOE**.")
+        push("assistant", "✅ Recorded as **ESCALATED to RCOE**.")
         st.session_state.stage = "POST"
         st.rerun()
     if c2.button("Back"):
@@ -387,7 +400,6 @@ elif st.session_state.stage == "ESCALATE":
 
 if st.session_state.get("stage") == "POST":
     st.markdown("<hr>", unsafe_allow_html=True)
-    assistant("Would you like to start a new triage?")
     c1, c2 = st.columns(2)
     if c1.button("Start New Triage"):
         start_over()
